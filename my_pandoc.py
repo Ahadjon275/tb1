@@ -1,116 +1,75 @@
-#!/usr/bin/env python3
-
-
+```python
 import io
 import os
 import subprocess
-
-import PyPDF2
+from PyPDF2 import PdfReader
 import pandas as pd
 from pptx import Presentation
+import my_log  # Предполагается, что этот модуль доступен
+import my_ocr  # Предполагается, что этот модуль доступен
+import utils    # Предполагается, что этот модуль доступен
 
-import my_log
-import my_ocr
-import utils
+def fb2_to_text(data, ext, lang):
+    if ext == 'epub':
+        # Конвертация EPUB в текст с использованием pandoc
+        result = subprocess.run(['pandoc', '-f', 'epub', '-t', 'plain'], input=data, capture_output=True)
+        return result.stdout.decode('utf-8')
 
+    elif ext == 'pptx':
+        return read_pptx(data)
 
-pandoc_cmd = 'pandoc'
-catdoc_cmd = 'catdoc'
+    elif ext in ['docx', 'odt', 'rtf']:
+        # Конвертация DOCX/ODT/RTF в текст с использованием pandoc
+        result = subprocess.run(['pandoc', '-f', ext, '-t', 'plain'], input=data, capture_output=True)
+        return result.stdout.decode('utf-8')
 
+    elif ext == 'djvu':
+        pdf_file = convert_djvu2pdf(data)
+        if pdf_file:
+            text = my_ocr.get_text_from_pdf(pdf_file)
+            os.remove(pdf_file)  # Удаление временного PDF файла
+            return text
 
-def fb2_to_text(data: bytes, ext: str = '', lang: str = '') -> str:
-    """convert from fb2 or epub (bytes) and other types of books file to string"""
-    if isinstance(data, str):
-        with open(data, 'rb') as f:
-            data = f.read()
-
-    ext = ext.lower()
-    if ext.startswith('.'):
-        ext = ext[1:]
-
-    input_file = utils.get_tmp_fname() + '.' + ext
-
-    with open(input_file, 'wb') as f:
-        f.write(data)
-
-    book_type = ext
-
-    if 'epub' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'epub', '-t', 'plain', input_file], stdout=subprocess.PIPE)
-    elif 'pptx' in book_type:
-        text = read_pptx(input_file)
-        utils.remove_file(input_file)
-        return text
-    elif 'docx' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'docx', '-t', 'plain', input_file], stdout=subprocess.PIPE)
-    elif 'html' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'html', '-t', 'plain', input_file], stdout=subprocess.PIPE)
-    elif 'odt' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'odt', '-t', 'plain', input_file], stdout=subprocess.PIPE)
-    elif 'rtf' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'rtf', '-t', 'plain', input_file], stdout=subprocess.PIPE)
-    elif 'doc' in book_type:
-        proc = subprocess.run([catdoc_cmd, input_file], stdout=subprocess.PIPE)
-    elif 'pdf' in book_type or 'djvu' in book_type:
-        if 'djvu' in book_type:
-            input_file = convert_djvu2pdf(input_file)
-
-        pdf_reader = PyPDF2.PdfReader(input_file)
+    elif ext == 'pdf':
+        reader = PdfReader(io.BytesIO(data))
         text = ''
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-
-        if len(text) < 100 and book_type == 'djvu':
-            with open(input_file, 'rb') as f:
-                file_bytes = f.read()
-            text = my_ocr.get_text_from_pdf(file_bytes, lang)
-
-        utils.remove_file(input_file)
+        for page in reader.pages:
+            text += page.extract_text() + '\n'
         return text
-    elif book_type in ('xlsx', 'ods', 'xls'):
-        df = pd.DataFrame(pd.read_excel(io.BytesIO(data)))
-        buffer = io.StringIO()
-        df.to_csv(buffer)
-        utils.remove_file(input_file)
-        return buffer.getvalue()
-    elif 'fb2' in book_type:
-        proc = subprocess.run([pandoc_cmd, '-f', 'fb2', '-t', 'plain', input_file], stdout=subprocess.PIPE)
+
+    elif ext in ['xlsx', 'xls']:
+        df = pd.read_excel(io.BytesIO(data))
+        return df.to_csv(index=False)
+
     else:
-        utils.remove_file(input_file)
-        try:
-            result = data.decode('utf-8').replace(u'\xa0', u' ')
-            return result
-        except Exception as error:
-            my_log.log2(f'my_pandoc:fb2_to_text other type error {error}')
-            return ''
+        raise ValueError(f"Unsupported file extension: {ext}")
 
-    utils.remove_file(input_file)
-
-    output = proc.stdout.decode('utf-8', errors='replace')
-
-    return output
-
-
-def read_pptx(input_file: str) -> str:
-    """read pptx file"""
-    prs = Presentation(input_file)
+def read_pptx(data):
+    presentation = Presentation(io.BytesIO(data))
     text = ''
-    for _, slide in enumerate(prs.slides):
-        for shape in slide.shapes: 
-            if hasattr(shape, "text"): 
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
                 text += shape.text + '\n'
     return text
 
+def convert_djvu2pdf(data):
+    temp_djvu_path = "temp.djvu"
+    temp_pdf_path = "temp.pdf"
+    
+    with open(temp_djvu_path, 'wb') as f:
+        f.write(data)
 
-def convert_djvu2pdf(input_file: str) -> str:
-    '''convert djvu to pdf and delete source file, return new file name'''
-    output_file = input_file + '.pdf'
-    subprocess.run(['ddjvu', '-format=pdf', input_file, output_file], check=True)
-    utils.remove_file(input_file)
-    return output_file
-
+    try:
+        subprocess.run(['ddjvu', '-format=pdf', temp_djvu_path, temp_pdf_path], check=True)
+        return temp_pdf_path
+    except subprocess.CalledProcessError as e:
+        my_log.log2('Failed to convert DJVU to PDF: {}'.format(e))
+        return None
+    finally:
+        os.remove(temp_djvu_path)  # Удаление временного DJVU файла
 
 if __name__ == '__main__':
-    # result = fb2_to_text(open('1.pdf', 'rb').read(), '.pdf')
-    # print(result)
-    print(convert_djvu2pdf('/home/ubuntu/tmp/2.djvu'))
+    # Здесь можно добавить тесты или основной функционал
+    pass
+```
